@@ -15,6 +15,7 @@ use anyhow::Result;
 // use bincode;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use walkdir::WalkDir;
 
 /// Log entry
 #[derive(Serialize, Deserialize, Debug)]
@@ -48,19 +49,31 @@ pub struct LogPointer {
 pub struct KvStore {
     keydir: HashMap<String, LogPointer>,
     active_file: File,
+    active_file_path: PathBuf,
     dir_path: PathBuf,
+    file_threshold: usize,
     max_size: usize,
 }
 
 impl KvStore {
     /// Create KvStore instance.
-    pub fn new(file: File, dir_path: PathBuf) -> Self {
-        KvStore {
+    pub fn new(dir_path: PathBuf) -> Result<Self> {
+        let active_file_path = dir_path.join("db.log");
+        let active_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .append(true)
+            .open(active_file_path.clone())?;
+
+        Ok(KvStore {
             keydir: HashMap::new(),
-            active_file: file,
+            active_file,
+            active_file_path,
             dir_path,
-            max_size: 10 * 1024,
-        }
+            file_threshold: 10 * 1024,
+            max_size: 5 * 10 * 1024,
+        })
     }
 
     /// Insert a key-value pair.
@@ -82,12 +95,52 @@ impl KvStore {
             },
         );
 
-        // compact
-        if file_size > self.max_size {
+        if file_size > self.file_threshold {
+            self.truncate_active_file();
+        }
+
+        if self.total_size() > self.max_size {
             self.compact();
         }
 
         Ok(())
+    }
+
+    /// Truncate current active file and create data file.
+    fn truncate_active_file(&mut self) -> Result<()> {
+        let start = SystemTime::now();
+        let since_the_epoch = start
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards");
+
+        let data_file_path = self.dir_path.join(format!(
+            "data-{}.log",
+            since_the_epoch.as_millis().to_string()
+        ));
+
+        std::fs::rename(self.active_file_path.clone(), data_file_path.clone());
+
+        self.scan_file(data_file_path);
+
+        self.active_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .append(true)
+            .open(self.active_file_path.clone())?;
+
+        Ok(())
+    }
+
+    fn total_size(&self) -> usize {
+        let entries = WalkDir::new(self.dir_path.clone()).into_iter();
+        let len: walkdir::Result<u64> = entries
+            .map(|res| {
+                res.and_then(|entry| entry.metadata())
+                    .map(|metadata| metadata.len())
+            })
+            .sum();
+        len.expect("fail to get directory size") as usize
     }
 
     /// Get a value with `key`.
@@ -131,44 +184,36 @@ impl KvStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
         let path: PathBuf = path.into();
 
-        let log_path = path.join("db.log");
-
-        let mut compact_files = vec![];
+        let mut compacted_paths = vec![];
         for entry in std::fs::read_dir(path.clone())? {
             let p = entry?.path();
             if p.is_file() {
                 if let Some(file_name) = p.file_name().map(|s| s.to_string_lossy()) {
                     if file_name.starts_with("compact") {
-                        compact_files.push(p);
+                        compacted_paths.push(p);
                     }
                 }
             }
         }
-        compact_files.sort_by(|a, b| b.cmp(a));
-        let compact_log_path = compact_files
+        compacted_paths.sort_by(|a, b| b.cmp(a));
+        let compacted_path = compacted_paths
             .first()
             .cloned()
             .unwrap_or(path.join("compact.log"));
 
-        let log_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .append(true)
-            .open(log_path.clone())?;
+        let mut kv_store = KvStore::new(path)?;
 
-        let mut kv_store = KvStore::new(log_file, path);
-
-        if compact_log_path.exists() {
-            kv_store.scan_file(compact_log_path)?
+        if compacted_path.exists() {
+            kv_store.scan_file(compacted_path)?;
         }
 
-        kv_store.scan_file(log_path);
+        kv_store.scan_active_file()?;
 
         Ok(kv_store)
     }
 
     fn compact(&mut self) -> Result<()> {
+        // compact
         let start = SystemTime::now();
         let since_the_epoch = start
             .duration_since(UNIX_EPOCH)
@@ -196,6 +241,18 @@ impl KvStore {
 
         compact_file.sync_all()?;
 
+        // remove stale data files and compact files
+        for entry in std::fs::read_dir(self.dir_path.clone())? {
+            let p = entry?.path();
+            if p.is_file() && p != compact_path {
+                if let Some(file_name) = p.file_name().map(|s| s.to_string_lossy()) {
+                    if file_name.starts_with("compact") || file_name.starts_with("data") {
+                        std::fs::remove_file(p);
+                    }
+                }
+            }
+        }
+
         // clear key-dir and active file
         self.keydir.clear();
         self.active_file.seek(SeekFrom::Start(0));
@@ -206,6 +263,10 @@ impl KvStore {
         self.scan_file(compact_path)?;
 
         Ok(())
+    }
+
+    fn scan_active_file(&mut self) -> Result<()> {
+        self.scan_file(self.active_file_path.clone())
     }
 
     /// Scan file and refresh inner

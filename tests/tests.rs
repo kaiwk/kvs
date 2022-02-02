@@ -274,17 +274,14 @@ fn compaction() -> Result<()> {
     };
 
     let mut current_size = dir_size();
-    println!("initial size: {:?}", current_size);
-    for iter in 0..100 {
-        for key_id in 0..100 {
+    for iter in 0..1000 {
+        for key_id in 0..1000 {
             let key = format!("key{}", key_id);
             let value = format!("{}", iter);
-            println!("set {:?} to {:?}", key, value);
             store.set(key, value)?;
         }
 
         let new_size = dir_size();
-        println!("new_size: {:?}, current_size: {:?}", new_size, current_size);
         if new_size > current_size {
             current_size = new_size;
             continue;
@@ -294,7 +291,7 @@ fn compaction() -> Result<()> {
         drop(store);
         // reopen and check content.
         let mut store = KvStore::open(temp_dir.path())?;
-        for key_id in 0..100 {
+        for key_id in 0..1000 {
             let key = format!("key{}", key_id);
             assert_eq!(store.get(key)?, Some(format!("{}", iter)));
         }
