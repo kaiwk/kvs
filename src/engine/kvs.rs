@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use walkdir::WalkDir;
 
+pub use crate::engine::KvsEngine;
+
 /// Log entry
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Entry {
@@ -76,36 +78,6 @@ impl KvStore {
         })
     }
 
-    /// Insert a key-value pair.
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let file_size = self.active_file.metadata()?.len() as usize;
-
-        let entry = Entry::Set {
-            key: key.clone(),
-            value: value.clone(),
-        };
-        writeln!(self.active_file, "{}", serde_json::to_string(&entry)?)?;
-        self.active_file.sync_all()?;
-
-        self.keydir.insert(
-            key,
-            LogPointer {
-                path: self.dir_path.join("db.log"),
-                offset: file_size,
-            },
-        );
-
-        if file_size > self.file_threshold {
-            self.truncate_active_file();
-        }
-
-        if self.total_size() > self.max_size {
-            self.compact();
-        }
-
-        Ok(())
-    }
-
     /// Truncate current active file and create data file.
     fn truncate_active_file(&mut self) -> Result<()> {
         let start = SystemTime::now();
@@ -141,43 +113,6 @@ impl KvStore {
             })
             .sum();
         len.expect("fail to get directory size") as usize
-    }
-
-    /// Get a value with `key`.
-    pub fn get(&self, key: String) -> Result<Option<String>> {
-        if let Some(log_pointer) = self.keydir.get(&key) {
-            let file = OpenOptions::new()
-                .read(true)
-                .open(log_pointer.path.clone())?;
-            let mut reader = BufReader::new(file);
-            reader.seek(SeekFrom::Start(log_pointer.offset as u64))?;
-            let mut entry_string = String::new();
-            reader.read_line(&mut entry_string)?;
-            let entry: Entry = serde_json::from_str(&entry_string)?;
-            if let Entry::Set { value, .. } = entry {
-                Ok(Some(value))
-            } else {
-                bail!("DB log error, there should be a Set entry");
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Remove a key-value pair.
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        if !self.keydir.contains_key(&key) {
-            println!("Key not found");
-            bail!("Key not found");
-        }
-
-        let entry = Entry::Remove { key: key.clone() };
-        writeln!(self.active_file, "{}", serde_json::to_string(&entry)?)?;
-        self.active_file.sync_all()?;
-
-        self.keydir.remove(&key);
-
-        Ok(())
     }
 
     /// Create KvStore from file.
@@ -229,7 +164,7 @@ impl KvStore {
             .open(compact_path.clone())?;
 
         for (key, _) in self.keydir.iter() {
-            if let Some(val) = self.get(key.to_owned())? {
+            if let Some(val) = self.read_value(key.to_owned())? {
                 let entry = Entry::Set {
                     key: key.clone(),
                     value: val.clone(),
@@ -292,6 +227,76 @@ impl KvStore {
             }
             bytes_len += line_string.as_bytes().len() + 1;
         }
+
+        Ok(())
+    }
+
+    fn read_value(&self, key: String) -> Result<Option<String>> {
+        if let Some(log_pointer) = self.keydir.get(&key) {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(log_pointer.path.clone())?;
+            let mut reader = BufReader::new(file);
+            reader.seek(SeekFrom::Start(log_pointer.offset as u64))?;
+            let mut entry_string = String::new();
+            reader.read_line(&mut entry_string)?;
+            let entry: Entry = serde_json::from_str(&entry_string)?;
+            if let Entry::Set { value, .. } = entry {
+                Ok(Some(value))
+            } else {
+                bail!("DB log error, there should be a Set entry");
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl KvsEngine for KvStore {
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        let file_size = self.active_file.metadata()?.len() as usize;
+
+        let entry = Entry::Set {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        writeln!(self.active_file, "{}", serde_json::to_string(&entry)?)?;
+        self.active_file.sync_all()?;
+
+        self.keydir.insert(
+            key,
+            LogPointer {
+                path: self.dir_path.join("db.log"),
+                offset: file_size,
+            },
+        );
+
+        if file_size > self.file_threshold {
+            self.truncate_active_file();
+        }
+
+        if self.total_size() > self.max_size {
+            self.compact();
+        }
+
+        Ok(())
+    }
+
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        self.read_value(key)
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        if !self.keydir.contains_key(&key) {
+            println!("Key not found");
+            bail!("Key not found");
+        }
+
+        let entry = Entry::Remove { key: key.clone() };
+        writeln!(self.active_file, "{}", serde_json::to_string(&entry)?)?;
+        self.active_file.sync_all()?;
+
+        self.keydir.remove(&key);
 
         Ok(())
     }

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use assert_cmd::prelude::*;
+use kvs::engine::KvsEngine;
 use kvs::KvStore;
 use predicates::ord::eq;
 use predicates::str::{contains, is_empty, PredicateStrExt};
