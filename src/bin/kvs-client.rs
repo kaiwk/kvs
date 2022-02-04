@@ -1,14 +1,20 @@
+use std::io::{Read, Write};
+use std::net::TcpStream;
+
 use anyhow::Result;
 use clap::{AppSettings, Parser, Subcommand};
 use kvs::engine::KvsEngine;
 use kvs::KvStore;
 
 #[derive(Parser)]
-#[clap(name = "kvs", author, version)]
-#[clap(about = "A KvStore CLI", long_about = None)]
-struct Cli {
+#[clap(name = "kvs-client", author, version)]
+#[clap(about = "A KvStore CLI Client", long_about = None)]
+struct KvsClient {
     #[clap(subcommand)]
     command: Commands,
+
+    #[clap(long)]
+    addr: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -36,25 +42,36 @@ enum Commands {
     },
 }
 fn main() -> Result<()> {
-    let args = Cli::parse();
-
-    let mut kv_store = KvStore::open(std::env::current_dir()?)?;
+    let args = KvsClient::parse();
+    let ip_port = args.addr.unwrap_or("127.0.0.1:4000".to_owned());
+    let mut stream = TcpStream::connect(ip_port)?;
 
     match &args.command {
         Commands::Set { key, value } => {
-            kv_store.set(key.to_owned(), value.to_owned());
+            stream.write(&['s' as u8])?;
+            stream.write(&(key.len() as u32).to_be_bytes())?;
+            stream.write(key.as_bytes())?;
+            stream.write(&(value.len() as u32).to_be_bytes())?;
+            stream.write(value.as_bytes())?;
         }
-        Commands::Get { key } => match kv_store.get(key.to_owned()) {
-            Ok(val) => match val {
-                Some(val) => println!("{}", val),
-                None => println!("Key not found"),
-            },
-            Err(e) => {
-                println!("Command get failed: {:?}", e);
-            }
-        },
+        Commands::Get { key } => {
+            stream.write(&['g' as u8])?;
+            stream.write(&(key.len() as u32).to_be_bytes())?;
+            stream.write(key.as_bytes())?;
+
+            let mut bytes = [0; 4];
+            stream.read_exact(&mut bytes);
+            let value_size = u32::from_be_bytes(bytes) as usize;
+
+            let mut value = vec![0; value_size];
+            stream.read_exact(&mut value);
+            let value = String::from_utf8_lossy(&value).to_string();
+            println!("{}", value);
+        }
         Commands::Rm { key } => {
-            kv_store.remove(key.to_owned())?;
+            stream.write(&['r' as u8])?;
+            stream.write(&(key.len() as u32).to_be_bytes())?;
+            stream.write(key.as_bytes())?;
         }
     }
 

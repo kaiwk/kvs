@@ -1,10 +1,9 @@
 //! kvs engine
 
-use anyhow::Result;
-
 pub mod kvs;
 
 pub use crate::engine::kvs::KvStore;
+pub use anyhow::Result;
 
 /// Storage interface called by KvsServer
 pub trait KvsEngine {
