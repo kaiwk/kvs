@@ -11,13 +11,16 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::bail;
-use anyhow::Result;
+use thiserror::Error;
 // use bincode;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use walkdir::WalkDir;
 
 pub use crate::engine::KvsEngine;
+
+/// Result for engine
+pub type Result<T> = std::result::Result<T, EngineError>;
 
 /// Log entry
 #[derive(Serialize, Deserialize, Debug)]
@@ -244,12 +247,34 @@ impl KvStore {
             if let Entry::Set { value, .. } = entry {
                 Ok(Some(value))
             } else {
-                bail!("DB log error, there should be a Set entry");
+                return Err(EngineError::NotFound(
+                    "DB log error, there should be a Set entry".to_owned(),
+                ));
             }
         } else {
             Ok(None)
         }
     }
+}
+
+/// Error for engine
+#[derive(Error, Debug)]
+pub enum EngineError {
+    /// Not found data for the given key
+    #[error("Key not found, `{0}` is not found")]
+    NotFound(String),
+
+    /// Io error
+    #[error("Io Error")]
+    Io(#[from] std::io::Error),
+
+    /// serde json error
+    #[error("serealize json failed")]
+    Serde(#[from] serde_json::Error),
+
+    /// Unknown error
+    #[error(transparent)]
+    Unknown(#[from] anyhow::Error),
 }
 
 impl KvsEngine for KvStore {
@@ -272,11 +297,11 @@ impl KvsEngine for KvStore {
         );
 
         if file_size > self.file_threshold {
-            self.truncate_active_file();
+            self.truncate_active_file()?;
         }
 
         if self.total_size() > self.max_size {
-            self.compact();
+            self.compact()?;
         }
 
         Ok(())
@@ -288,8 +313,7 @@ impl KvsEngine for KvStore {
 
     fn remove(&mut self, key: String) -> Result<()> {
         if !self.keydir.contains_key(&key) {
-            println!("Key not found");
-            bail!("Key not found");
+            return Err(EngineError::NotFound(key));
         }
 
         let entry = Entry::Remove { key: key.clone() };

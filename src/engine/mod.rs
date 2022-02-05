@@ -3,7 +3,7 @@
 pub mod kvs;
 
 pub use crate::engine::kvs::KvStore;
-pub use anyhow::Result;
+pub use crate::engine::kvs::Result;
 
 /// Storage interface called by KvsServer
 pub trait KvsEngine {
