@@ -1,11 +1,12 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::io::AsRawFd;
 
 use anyhow::{anyhow, bail, Result};
 use clap::{AppSettings, ArgEnum, Parser, Subcommand};
 use kvs::engine::KvsEngine;
 use kvs::kvs::EngineError;
-use kvs::KvStore;
+use kvs::{KvStore, SledEngine};
 use log::debug;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum, Debug)]
@@ -35,9 +36,33 @@ fn main() -> Result<()> {
     debug!("listening {:?} with storage engine {:?}", addr, engine);
 
     let tcp_listener = TcpListener::bind(addr)?;
+    let socket = tcp_listener.as_raw_fd();
+
+    // Keep trying to set socket non-blocking until we succeed
+    loop {
+        if tcp_listener.set_nonblocking(true).is_ok() {
+            break;
+        }
+    }
 
     for stream in tcp_listener.incoming() {
-        handle_client(stream?)?;
+        match stream {
+            Ok(stream) => match engine {
+                Engine::Kvs => handle_client(KvStore::open(std::env::current_dir()?)?, stream)?,
+                Engine::Sled => handle_client(SledEngine::open(std::env::current_dir()?)?, stream)?,
+            },
+            Err(err) => {
+                if err.kind() != std::io::ErrorKind::WouldBlock {
+                    break;
+                }
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    unsafe {
+        libc::shutdown(socket, libc::SHUT_RD);
     }
 
     Ok(())
@@ -61,7 +86,7 @@ enum Method {
 /// 0x00 -> success
 /// 0x01 -> failed,
 /// followed by the returned value size and value it self
-fn handle_client(mut stream: TcpStream) -> Result<()> {
+fn handle_client<T: KvsEngine>(mut engine: T, mut stream: TcpStream) -> Result<()> {
     let mut bytes = [0; 1];
     stream.read_exact(&mut bytes)?;
 
@@ -86,10 +111,8 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
 
     debug!("key_size: {:?}, key: {:?}", key_size, key);
 
-    let mut kv_store = KvStore::open(std::env::current_dir()?)?;
-
     if method == Method::Get {
-        let value = match kv_store.get(key) {
+        let value = match engine.get(key) {
             Ok(value) => match value {
                 Some(value) => {
                     stream.write(&0_u8.to_be_bytes())?;
@@ -113,7 +136,7 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
     }
 
     if matches!(method, Method::Remove) {
-        if let Err(e) = kv_store.remove(key) {
+        if let Err(e) = engine.remove(key) {
             if matches!(e, EngineError::NotFound(_)) {
                 let value = "Key not found".to_owned();
 
@@ -138,7 +161,7 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
     debug!("value_size: {:?}, value: {:?}", value_size, value);
 
     if matches!(method, Method::Set) {
-        kv_store.set(key, value)?;
+        engine.set(key, value)?;
         stream.write(&0_u8.to_be_bytes())?;
         return Ok(());
     }

@@ -295,6 +295,8 @@ fn cli_access_server(engine: &str, addr: &str) {
     sender.send(()).unwrap();
     handle.join().unwrap();
 
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
     // Reopen and check value
     let (sender, receiver) = mpsc::sync_channel(0);
     let mut server = Command::cargo_bin("kvs-server").unwrap();

@@ -1,9 +1,12 @@
 //! kvs engine
 
 pub mod kvs;
+pub mod sled_engine;
 
+pub use crate::engine::kvs::EngineError;
 pub use crate::engine::kvs::KvStore;
 pub use crate::engine::kvs::Result;
+pub use sled_engine::SledEngine;
 
 /// Storage interface called by KvsServer
 pub trait KvsEngine {
