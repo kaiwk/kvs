@@ -2,11 +2,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use clap::{AppSettings, Parser, Subcommand};
-use kvs::engine::KvsEngine;
 use kvs::kvs::EngineError;
-use kvs::KvStore;
 use kvs::Result;
-use log::debug;
 
 #[derive(Parser)]
 #[clap(name = "kvs-client", author, version)]

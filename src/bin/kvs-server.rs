@@ -2,10 +2,11 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::AsRawFd;
 
-use anyhow::{anyhow, bail, Result};
-use clap::{AppSettings, ArgEnum, Parser, Subcommand};
+use anyhow::{bail, Result};
+use clap::{ArgEnum, Parser};
 use kvs::engine::KvsEngine;
 use kvs::kvs::EngineError;
+use kvs::thread_pool::*;
 use kvs::{KvStore, SledEngine};
 use log::debug;
 
@@ -45,11 +46,26 @@ fn main() -> Result<()> {
         }
     }
 
+    let thread_pool = NaiveThreadPool::new(4)?;
+
     for stream in tcp_listener.incoming() {
         match stream {
             Ok(stream) => match engine {
-                Engine::Kvs => handle_client(KvStore::open(std::env::current_dir()?)?, stream)?,
-                Engine::Sled => handle_client(SledEngine::open(std::env::current_dir()?)?, stream)?,
+                Engine::Kvs => thread_pool.spawn(|| {
+                    debug!("spawn job in thread: {:?}", std::thread::current().id());
+                    handle_client(
+                        KvStore::open(std::env::current_dir().unwrap()).unwrap(),
+                        stream,
+                    )
+                    .unwrap()
+                }),
+                Engine::Sled => thread_pool.spawn(|| {
+                    handle_client(
+                        SledEngine::open(std::env::current_dir().unwrap()).unwrap(),
+                        stream,
+                    )
+                    .unwrap()
+                }),
             },
             Err(err) => {
                 if err.kind() != std::io::ErrorKind::WouldBlock {
@@ -86,7 +102,7 @@ enum Method {
 /// 0x00 -> success
 /// 0x01 -> failed,
 /// followed by the returned value size and value it self
-fn handle_client<T: KvsEngine>(mut engine: T, mut stream: TcpStream) -> Result<()> {
+fn handle_client<T: KvsEngine>(engine: T, mut stream: TcpStream) -> Result<()> {
     let mut bytes = [0; 1];
     stream.read_exact(&mut bytes)?;
 

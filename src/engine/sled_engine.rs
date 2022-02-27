@@ -9,7 +9,8 @@ use crate::engine::KvsEngine;
 use crate::kvs::EngineError;
 use crate::Result;
 
-/// Sled Engine
+
+#[derive(Clone)]
 pub struct SledEngine {
     inner: sled::Db,
 }
@@ -24,7 +25,7 @@ impl SledEngine {
 }
 
 impl KvsEngine for SledEngine {
-    fn set(&mut self, key: String, value: String) -> Result<()> {
+    fn set(&self, key: String, value: String) -> Result<()> {
         let _ = self
             .inner
             .insert(key.as_bytes(), value.as_bytes())
@@ -32,7 +33,7 @@ impl KvsEngine for SledEngine {
         Ok(())
     }
 
-    fn get(&mut self, key: String) -> Result<Option<String>> {
+    fn get(&self, key: String) -> Result<Option<String>> {
         let result = self
             .inner
             .get(key)
@@ -42,7 +43,7 @@ impl KvsEngine for SledEngine {
         Ok(result)
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
+    fn remove(&self, key: String) -> Result<()> {
         let _ = self
             .inner
             .remove(key.clone())

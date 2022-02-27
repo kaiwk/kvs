@@ -8,9 +8,10 @@ use std::fs::OpenOptions;
 use std::io::SeekFrom;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::bail;
 use thiserror::Error;
 // use bincode;
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,7 @@ pub enum Entry {
 }
 
 /// Log path + offset
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogPointer {
     // Log Path
     path: PathBuf,
@@ -51,9 +52,10 @@ pub struct LogPointer {
 }
 
 /// Store key-value pair
+#[derive(Clone)]
 pub struct KvStore {
-    keydir: HashMap<String, LogPointer>,
-    active_file: File,
+    keydir: Arc<Mutex<HashMap<String, LogPointer>>>,
+    active_file: Arc<Mutex<File>>,
     active_file_path: PathBuf,
     dir_path: PathBuf,
     file_threshold: usize,
@@ -64,15 +66,17 @@ impl KvStore {
     /// Create KvStore instance.
     pub fn new(dir_path: PathBuf) -> Result<Self> {
         let active_file_path = dir_path.join("db.log");
-        let active_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .append(true)
-            .open(active_file_path.clone())?;
+        let active_file = Arc::new(Mutex::new(
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .append(true)
+                .open(active_file_path.clone())?,
+        ));
 
         Ok(KvStore {
-            keydir: HashMap::new(),
+            keydir: Arc::new(Mutex::new(HashMap::new())),
             active_file,
             active_file_path,
             dir_path,
@@ -82,7 +86,7 @@ impl KvStore {
     }
 
     /// Truncate current active file and create data file.
-    fn truncate_active_file(&mut self) -> Result<()> {
+    fn truncate_active_file(&self) -> Result<()> {
         let start = SystemTime::now();
         let since_the_epoch = start
             .duration_since(UNIX_EPOCH)
@@ -93,11 +97,12 @@ impl KvStore {
             since_the_epoch.as_millis().to_string()
         ));
 
-        std::fs::rename(self.active_file_path.clone(), data_file_path.clone());
+        std::fs::rename(self.active_file_path.clone(), data_file_path.clone())?;
 
-        self.scan_file(data_file_path);
+        self.scan_file(data_file_path)?;
 
-        self.active_file = OpenOptions::new()
+        let mut active_file = self.active_file.lock().unwrap();
+        *active_file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -139,7 +144,7 @@ impl KvStore {
             .cloned()
             .unwrap_or(path.join("compact.log"));
 
-        let mut kv_store = KvStore::new(path)?;
+        let kv_store = KvStore::new(path)?;
 
         if compacted_path.exists() {
             kv_store.scan_file(compacted_path)?;
@@ -150,7 +155,7 @@ impl KvStore {
         Ok(kv_store)
     }
 
-    fn compact(&mut self) -> Result<()> {
+    fn compact(&self) -> Result<()> {
         // compact
         let start = SystemTime::now();
         let since_the_epoch = start
@@ -166,8 +171,9 @@ impl KvStore {
             .write(true)
             .open(compact_path.clone())?;
 
-        for (key, _) in self.keydir.iter() {
-            if let Some(val) = self.read_value(key.to_owned())? {
+        let keydir = self.keydir.lock().unwrap();
+        for (key, _) in keydir.iter() {
+            if let Some(val) = self.read_value(&*keydir, key.to_owned())? {
                 let entry = Entry::Set {
                     key: key.clone(),
                     value: val.clone(),
@@ -176,6 +182,7 @@ impl KvStore {
                 writeln!(compact_file, "{}", serde_json::to_string(&entry)?)?;
             }
         }
+        drop(keydir);
 
         compact_file.sync_all()?;
 
@@ -185,17 +192,22 @@ impl KvStore {
             if p.is_file() && p != compact_path {
                 if let Some(file_name) = p.file_name().map(|s| s.to_string_lossy()) {
                     if file_name.starts_with("compact") || file_name.starts_with("data") {
-                        std::fs::remove_file(p);
+                        std::fs::remove_file(p)?;
                     }
                 }
             }
         }
 
         // clear key-dir and active file
-        self.keydir.clear();
-        self.active_file.seek(SeekFrom::Start(0));
-        self.active_file.set_len(0);
-        self.active_file.sync_all()?;
+        let mut keydir = self.keydir.lock().unwrap();
+        keydir.clear();
+        drop(keydir);
+
+        let mut active_file = self.active_file.lock().unwrap();
+        active_file.seek(SeekFrom::Start(0))?;
+        active_file.set_len(0)?;
+        active_file.sync_all()?;
+        drop(active_file);
 
         // scan
         self.scan_file(compact_path)?;
@@ -203,12 +215,12 @@ impl KvStore {
         Ok(())
     }
 
-    fn scan_active_file(&mut self) -> Result<()> {
+    fn scan_active_file(&self) -> Result<()> {
         self.scan_file(self.active_file_path.clone())
     }
 
     /// Scan file and refresh inner
-    fn scan_file(&mut self, path: PathBuf) -> Result<()> {
+    fn scan_file(&self, path: PathBuf) -> Result<()> {
         let mut bytes_len = 0;
         let reader = BufReader::new(OpenOptions::new().read(true).open(path.clone())?);
         for line in reader.lines() {
@@ -216,7 +228,8 @@ impl KvStore {
             let entry: Entry = serde_json::from_str(&line_string)?;
             match entry {
                 Entry::Set { key, .. } => {
-                    self.keydir.insert(
+                    let mut keydir = self.keydir.lock().unwrap();
+                    keydir.insert(
                         key,
                         LogPointer {
                             path: path.clone(),
@@ -225,7 +238,8 @@ impl KvStore {
                     );
                 }
                 Entry::Remove { key } => {
-                    self.keydir.remove(&key);
+                    let mut keydir = self.keydir.lock().unwrap();
+                    keydir.remove(&key);
                 }
             }
             bytes_len += line_string.as_bytes().len() + 1;
@@ -234,8 +248,12 @@ impl KvStore {
         Ok(())
     }
 
-    fn read_value(&self, key: String) -> Result<Option<String>> {
-        if let Some(log_pointer) = self.keydir.get(&key) {
+    fn read_value(
+        &self,
+        keydir: &HashMap<String, LogPointer>,
+        key: String,
+    ) -> Result<Option<String>> {
+        if let Some(log_pointer) = keydir.get(&key) {
             let file = OpenOptions::new()
                 .read(true)
                 .open(log_pointer.path.clone())?;
@@ -278,23 +296,27 @@ pub enum EngineError {
 }
 
 impl KvsEngine for KvStore {
-    fn set(&mut self, key: String, value: String) -> Result<()> {
-        let file_size = self.active_file.metadata()?.len() as usize;
+    fn set(&self, key: String, value: String) -> Result<()> {
+        let mut active_file = self.active_file.lock().unwrap();
+        let file_size = active_file.metadata()?.len() as usize;
 
         let entry = Entry::Set {
             key: key.clone(),
             value: value.clone(),
         };
-        writeln!(self.active_file, "{}", serde_json::to_string(&entry)?)?;
-        self.active_file.sync_all()?;
+        writeln!(active_file, "{}", serde_json::to_string(&entry)?)?;
+        active_file.sync_all()?;
+        drop(active_file);
 
-        self.keydir.insert(
+        let mut keydir = self.keydir.lock().unwrap();
+        keydir.insert(
             key,
             LogPointer {
                 path: self.dir_path.join("db.log"),
                 offset: file_size,
             },
         );
+        drop(keydir);
 
         if file_size > self.file_threshold {
             self.truncate_active_file()?;
@@ -307,20 +329,24 @@ impl KvsEngine for KvStore {
         Ok(())
     }
 
-    fn get(&mut self, key: String) -> Result<Option<String>> {
-        self.read_value(key)
+    fn get(&self, key: String) -> Result<Option<String>> {
+        let keydir = self.keydir.lock().unwrap();
+        self.read_value(&*keydir, key)
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
-        if !self.keydir.contains_key(&key) {
+    fn remove(&self, key: String) -> Result<()> {
+        let mut keydir = self.keydir.lock().unwrap();
+        if !keydir.contains_key(&key) {
             return Err(EngineError::NotFound(key));
         }
 
+        let mut active_file = self.active_file.lock().unwrap();
         let entry = Entry::Remove { key: key.clone() };
-        writeln!(self.active_file, "{}", serde_json::to_string(&entry)?)?;
-        self.active_file.sync_all()?;
+        writeln!(active_file, "{}", serde_json::to_string(&entry)?)?;
+        active_file.sync_all()?;
+        drop(active_file);
 
-        self.keydir.remove(&key);
+        keydir.remove(&key);
 
         Ok(())
     }
