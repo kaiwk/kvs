@@ -46,7 +46,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let thread_pool = NaiveThreadPool::new(4)?;
+    let thread_pool = SharedQueueThreadPool::new(4)?;
 
     for stream in tcp_listener.incoming() {
         match stream {
