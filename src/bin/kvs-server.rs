@@ -1,6 +1,5 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::io::AsRawFd;
 
 use anyhow::{bail, Result};
 use clap::{ArgEnum, Parser};
@@ -37,14 +36,6 @@ fn main() -> Result<()> {
     debug!("listening {:?} with storage engine {:?}", addr, engine);
 
     let tcp_listener = TcpListener::bind(addr)?;
-    let socket = tcp_listener.as_raw_fd();
-
-    // Keep trying to set socket non-blocking until we succeed
-    loop {
-        if tcp_listener.set_nonblocking(true).is_ok() {
-            break;
-        }
-    }
 
     let thread_pool = SharedQueueThreadPool::new(4)?;
 
@@ -75,10 +66,6 @@ fn main() -> Result<()> {
         }
 
         std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-
-    unsafe {
-        libc::shutdown(socket, libc::SHUT_RD);
     }
 
     Ok(())
@@ -147,6 +134,7 @@ fn handle_client<T: KvsEngine>(engine: T, mut stream: TcpStream) -> Result<()> {
 
         stream.write(&(value.len() as u32).to_be_bytes())?;
         stream.write(value.as_bytes())?;
+        stream.flush()?;
 
         return Ok(());
     }
@@ -163,6 +151,7 @@ fn handle_client<T: KvsEngine>(engine: T, mut stream: TcpStream) -> Result<()> {
         }
 
         stream.write(&0_u8.to_be_bytes())?;
+        stream.flush()?;
         return Ok(());
     }
 
@@ -179,6 +168,7 @@ fn handle_client<T: KvsEngine>(engine: T, mut stream: TcpStream) -> Result<()> {
     if matches!(method, Method::Set) {
         engine.set(key, value)?;
         stream.write(&0_u8.to_be_bytes())?;
+        stream.flush()?;
         return Ok(());
     }
 

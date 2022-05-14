@@ -262,7 +262,9 @@ impl KvStore {
             let mut entry_string = String::new();
             reader.read_line(&mut entry_string)?;
             let entry: Entry = serde_json::from_str(&entry_string)?;
+
             if let Entry::Set { value, .. } = entry {
+                println!("<===== Get key: {:?}, value: {:?}", key, value);
                 Ok(Some(value))
             } else {
                 return Err(EngineError::NotFound(
@@ -279,15 +281,15 @@ impl KvStore {
 #[derive(Error, Debug)]
 pub enum EngineError {
     /// Not found data for the given key
-    #[error("Key not found, `{0}` is not found")]
+    #[error("Kvs: Key not found, `{0}` is not found")]
     NotFound(String),
 
     /// Io error
-    #[error("Io Error")]
+    #[error("Kvs: Io Error")]
     Io(#[from] std::io::Error),
 
     /// serde json error
-    #[error("serealize json failed")]
+    #[error("Kvs: serealize json failed")]
     Serde(#[from] serde_json::Error),
 
     /// Unknown error
@@ -299,6 +301,8 @@ impl KvsEngine for KvStore {
     fn set(&self, key: String, value: String) -> Result<()> {
         let mut active_file = self.active_file.lock().unwrap();
         let file_size = active_file.metadata()?.len() as usize;
+
+        println!("=====> Set key: {:?}, value: {:?}", key, value);
 
         let entry = Entry::Set {
             key: key.clone(),
@@ -330,6 +334,7 @@ impl KvsEngine for KvStore {
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
+        println!("!!!!!!! start get key: {:?}", key);
         let keydir = self.keydir.lock().unwrap();
         self.read_value(&*keydir, key)
     }

@@ -1,10 +1,8 @@
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Sender;
-use std::sync::Arc;
-use std::sync::Mutex;
+use crossbeam::channel::{self, Receiver, Sender};
 use std::thread;
 
 use anyhow::Result;
+use log::debug;
 use log::warn;
 
 use crate::thread_pool::ThreadPool;
@@ -19,26 +17,41 @@ pub struct SharedQueueThreadPool {
     thread_handles: Vec<thread::JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+struct TaskReceiver(Receiver<ThreadPoolMessage>);
+
+impl Drop for TaskReceiver {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            let rx = self.clone();
+            if let Err(e) = thread::Builder::new().spawn(move || run_task(rx)) {
+                warn!("run task failed, {:?}", e);
+            }
+        }
+    }
+}
+
+fn run_task(receiver: TaskReceiver) {
+    loop {
+        match receiver.0.recv() {
+            Ok(msg) => match msg {
+                ThreadPoolMessage::RunJob(job) => job(),
+                ThreadPoolMessage::Shutdown => return,
+            },
+            Err(e) => debug!("thread pool exits: {:?}", e),
+        }
+    }
+}
+
 impl ThreadPool for SharedQueueThreadPool {
     fn new(threads: u32) -> Result<SharedQueueThreadPool> {
-        let (tx, rx) = channel();
+        let (tx, rx) = channel::unbounded();
         let mut thread_handles = Vec::new();
-        let rx_ = Arc::new(Mutex::new(rx));
         for _ in 0..threads {
-            let rx_ = rx_.clone();
-            let handle = thread::spawn(move || loop {
-                let rx = rx_.lock().unwrap();
-                if let Ok(msg) = rx.recv() {
-                    drop(rx);
-                    match msg {
-                        ThreadPoolMessage::RunJob(job) => job(),
-                        ThreadPoolMessage::Shutdown => break,
-                    }
-                } else {
-                    warn!("rx recv failed");
-                }
+            let task_receiver = TaskReceiver(rx.clone());
+            let handle = thread::spawn(move || {
+                run_task(task_receiver);
             });
-
             thread_handles.push(handle);
         }
 

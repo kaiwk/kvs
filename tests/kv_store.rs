@@ -127,6 +127,7 @@ fn compaction() -> Result<()> {
     panic!("No compaction detected");
 }
 
+#[ignore]
 #[test]
 fn concurrent_set() -> Result<()> {
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -158,6 +159,7 @@ fn concurrent_set() -> Result<()> {
     Ok(())
 }
 
+#[ignore]
 #[test]
 fn concurrent_get() -> Result<()> {
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");

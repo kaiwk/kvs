@@ -62,6 +62,7 @@ fn run(args: KvsClient) -> Result<()> {
             stream.write(key.as_bytes())?;
             stream.write(&(value.len() as u32).to_be_bytes())?;
             stream.write(value.as_bytes())?;
+            stream.flush()?;
 
             let mut status = [0; 1];
             stream.read_exact(&mut status)?;
@@ -72,6 +73,7 @@ fn run(args: KvsClient) -> Result<()> {
             stream.write(&['g' as u8])?;
             stream.write(&(key.len() as u32).to_be_bytes())?;
             stream.write(key.as_bytes())?;
+            stream.flush()?;
 
             let mut status = [0; 1];
             stream.read_exact(&mut status)?;
@@ -91,6 +93,7 @@ fn run(args: KvsClient) -> Result<()> {
             stream.write(&['r' as u8])?;
             stream.write(&(key.len() as u32).to_be_bytes())?;
             stream.write(key.as_bytes())?;
+            stream.flush()?;
 
             let mut status = [0; 1];
             stream.read_exact(&mut status)?;
@@ -102,7 +105,7 @@ fn run(args: KvsClient) -> Result<()> {
 
                 let mut value = vec![0; value_size];
                 stream.read_exact(&mut value)?;
-                let value = String::from_utf8_lossy(&value).to_string();
+                let _ = String::from_utf8_lossy(&value).to_string();
                 return Err(EngineError::NotFound(key));
             }
         }
