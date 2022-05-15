@@ -86,7 +86,7 @@ impl KvStore {
     }
 
     /// Truncate current active file and create data file.
-    fn truncate_active_file(&self) -> Result<()> {
+    fn truncate_active_file(&self, active_file: &mut File) -> Result<()> {
         let start = SystemTime::now();
         let since_the_epoch = start
             .duration_since(UNIX_EPOCH)
@@ -97,11 +97,14 @@ impl KvStore {
             since_the_epoch.as_millis().to_string()
         ));
 
+        println!(
+            "truncate active file, rename to filename: {:?}",
+            data_file_path
+        );
         std::fs::rename(self.active_file_path.clone(), data_file_path.clone())?;
 
         self.scan_file(data_file_path)?;
 
-        let mut active_file = self.active_file.lock().unwrap();
         *active_file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -128,12 +131,16 @@ impl KvStore {
         let path: PathBuf = path.into();
 
         let mut compacted_paths = vec![];
+        let mut data_paths = vec![];
         for entry in std::fs::read_dir(path.clone())? {
             let p = entry?.path();
             if p.is_file() {
                 if let Some(file_name) = p.file_name().map(|s| s.to_string_lossy()) {
                     if file_name.starts_with("compact") {
-                        compacted_paths.push(p);
+                        compacted_paths.push(p.clone());
+                    }
+                    if file_name.starts_with("data") {
+                        data_paths.push(p);
                     }
                 }
             }
@@ -148,6 +155,10 @@ impl KvStore {
 
         if compacted_path.exists() {
             kv_store.scan_file(compacted_path)?;
+        }
+
+        for data_path in data_paths {
+            kv_store.scan_file(data_path)?;
         }
 
         kv_store.scan_active_file()?;
@@ -264,7 +275,7 @@ impl KvStore {
             let entry: Entry = serde_json::from_str(&entry_string)?;
 
             if let Entry::Set { value, .. } = entry {
-                println!("<===== Get key: {:?}, value: {:?}", key, value);
+                // println!("<===== Get key: {:?}, value: {:?}", key, value);
                 Ok(Some(value))
             } else {
                 return Err(EngineError::NotFound(
@@ -302,7 +313,10 @@ impl KvsEngine for KvStore {
         let mut active_file = self.active_file.lock().unwrap();
         let file_size = active_file.metadata()?.len() as usize;
 
-        println!("=====> Set key: {:?}, value: {:?}", key, value);
+        // println!(
+        //     "=====> Set key: {:?}, value: {:?}, file: {:?}",
+        //     key, value, active_file
+        // );
 
         let entry = Entry::Set {
             key: key.clone(),
@@ -310,21 +324,22 @@ impl KvsEngine for KvStore {
         };
         writeln!(active_file, "{}", serde_json::to_string(&entry)?)?;
         active_file.sync_all()?;
-        drop(active_file);
 
         let mut keydir = self.keydir.lock().unwrap();
         keydir.insert(
             key,
             LogPointer {
-                path: self.dir_path.join("db.log"),
+                path: self.active_file_path.clone(),
                 offset: file_size,
             },
         );
         drop(keydir);
 
         if file_size > self.file_threshold {
-            self.truncate_active_file()?;
+            self.truncate_active_file(&mut active_file)?;
         }
+
+        drop(active_file);
 
         if self.total_size() > self.max_size {
             self.compact()?;
@@ -334,7 +349,6 @@ impl KvsEngine for KvStore {
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        println!("!!!!!!! start get key: {:?}", key);
         let keydir = self.keydir.lock().unwrap();
         self.read_value(&*keydir, key)
     }

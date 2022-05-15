@@ -1,18 +1,50 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-
-use anyhow::{bail, Result};
-use clap::{ArgEnum, Parser};
 use kvs::engine::KvsEngine;
 use kvs::kvs::EngineError;
 use kvs::thread_pool::*;
 use kvs::{KvStore, SledEngine};
+
+use anyhow::{anyhow, bail, Result};
+use clap::{ArgEnum, Parser};
 use log::debug;
+use log::error;
+use log::warn;
+
+use std::env::current_dir;
+use std::fmt;
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::process::exit;
+use std::str::FromStr;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum, Debug)]
 enum Engine {
     Kvs,
     Sled,
+}
+
+impl FromStr for Engine {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let engine = match s {
+            "kvs" => Engine::Kvs,
+            "sled" => Engine::Sled,
+            _ => return Err(anyhow!("parse str to engine failed")),
+        };
+
+        Ok(engine)
+    }
+}
+
+impl fmt::Display for Engine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Engine::Kvs => "kvs",
+            Engine::Sled => "sled",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 #[derive(Parser)]
@@ -30,10 +62,24 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = KvsServer::parse();
     let addr = args.addr.unwrap_or("127.0.0.1:4000".to_owned());
-    let engine = args.engine.unwrap_or(Engine::Kvs);
+
+    // check if engine exists
+    let engine = if let Some(engine) = args.engine {
+        if let Some(curr_engine) = current_engine()? {
+            if engine != curr_engine {
+                error!("Wrong engine!");
+                exit(1);
+            }
+        }
+        engine
+    } else {
+        current_engine()?.expect("please specify engine")
+    };
 
     debug!("kvs-server version: {:?}", env!("CARGO_PKG_VERSION"));
     debug!("listening {:?} with storage engine {:?}", addr, engine);
+
+    fs::write(current_dir()?.join("engine"), format!("{}", engine))?;
 
     let tcp_listener = TcpListener::bind(addr)?;
 
@@ -69,6 +115,21 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn current_engine() -> Result<Option<Engine>> {
+    let engine = current_dir()?.join("engine");
+    if !engine.exists() {
+        return Ok(None);
+    }
+
+    match fs::read_to_string(engine)?.parse() {
+        Ok(engine) => Ok(Some(engine)),
+        Err(e) => {
+            warn!("The content of engine file is invalid: {}", e);
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum, Debug)]

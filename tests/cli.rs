@@ -171,7 +171,6 @@ fn cli_log_configuration() {
     assert!(content.contains("127.0.0.1:4001"));
 }
 
-#[ignore]
 #[test]
 fn cli_wrong_engine() {
     // sled first, kvs second
