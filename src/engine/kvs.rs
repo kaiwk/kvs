@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::BufWriter;
 use std::io::SeekFrom;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
@@ -55,7 +56,7 @@ pub struct LogPointer {
 #[derive(Clone)]
 pub struct KvStore {
     keydir: Arc<Mutex<HashMap<String, LogPointer>>>,
-    active_file: Arc<Mutex<File>>,
+    active_file_writer: Arc<Mutex<BufWriter<File>>>,
     active_file_path: PathBuf,
     dir_path: PathBuf,
     file_threshold: usize,
@@ -66,18 +67,18 @@ impl KvStore {
     /// Create KvStore instance.
     pub fn new(dir_path: PathBuf) -> Result<Self> {
         let active_file_path = dir_path.join("db.log");
-        let active_file = Arc::new(Mutex::new(
+        let active_file = Arc::new(Mutex::new(BufWriter::new(
             OpenOptions::new()
                 .create(true)
                 .read(true)
                 .write(true)
                 .append(true)
                 .open(active_file_path.clone())?,
-        ));
+        )));
 
         Ok(KvStore {
             keydir: Arc::new(Mutex::new(HashMap::new())),
-            active_file,
+            active_file_writer: active_file,
             active_file_path,
             dir_path,
             file_threshold: 10 * 1024,
@@ -214,10 +215,9 @@ impl KvStore {
         keydir.clear();
         drop(keydir);
 
-        let mut active_file = self.active_file.lock().unwrap();
+        let mut active_file = self.active_file_writer.lock().unwrap();
         active_file.seek(SeekFrom::Start(0))?;
-        active_file.set_len(0)?;
-        active_file.sync_all()?;
+        active_file.get_mut().set_len(0)?;
         drop(active_file);
 
         // scan
@@ -310,8 +310,8 @@ pub enum EngineError {
 
 impl KvsEngine for KvStore {
     fn set(&self, key: String, value: String) -> Result<()> {
-        let mut active_file = self.active_file.lock().unwrap();
-        let file_size = active_file.metadata()?.len() as usize;
+        let mut active_file = self.active_file_writer.lock().unwrap();
+        let file_size = active_file.get_ref().metadata()?.len() as usize;
 
         // println!(
         //     "=====> Set key: {:?}, value: {:?}, file: {:?}",
@@ -323,7 +323,7 @@ impl KvsEngine for KvStore {
             value: value.clone(),
         };
         writeln!(active_file, "{}", serde_json::to_string(&entry)?)?;
-        active_file.sync_all()?;
+        active_file.flush()?;
 
         let mut keydir = self.keydir.lock().unwrap();
         keydir.insert(
@@ -336,7 +336,7 @@ impl KvsEngine for KvStore {
         drop(keydir);
 
         if file_size > self.file_threshold {
-            self.truncate_active_file(&mut active_file)?;
+            self.truncate_active_file(active_file.get_mut())?;
         }
 
         drop(active_file);
@@ -359,10 +359,10 @@ impl KvsEngine for KvStore {
             return Err(EngineError::NotFound(key));
         }
 
-        let mut active_file = self.active_file.lock().unwrap();
+        let mut active_file = self.active_file_writer.lock().unwrap();
         let entry = Entry::Remove { key: key.clone() };
         writeln!(active_file, "{}", serde_json::to_string(&entry)?)?;
-        active_file.sync_all()?;
+        active_file.flush()?;
         drop(active_file);
 
         keydir.remove(&key);
